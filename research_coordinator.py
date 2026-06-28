@@ -132,9 +132,11 @@ def run_agent(system_prompt, first_message, tools, submit_tool_name):
             tools=tools,
         )
         messages.append({"role": "assistant", "content": response.content})
+        print(f"  [STOP_REASON CHECK] iteration {iteration+1}: stop_reason='{response.stop_reason}'")
 
         # --- This is the key check: what should the agent do next? ---
         if response.stop_reason == "tool_use":
+            print("  [STOP_REASON CHECK] -> ACT: tool requested, will execute and CONTINUE loop")
             tool_results = []
             for block in response.content:
                 if block.type != "tool_use":
@@ -143,6 +145,7 @@ def run_agent(system_prompt, first_message, tools, submit_tool_name):
                 if block.name == submit_tool_name:
                     # The model handed us its final structured answer.
                     # We stop here -- this is a successful halt.
+                    print(f"  [STOP_REASON CHECK] -> HALT: '{submit_tool_name}' called, task truly done")
                     return block.input
 
                 elif block.name == "search_sources":
@@ -157,19 +160,23 @@ def run_agent(system_prompt, first_message, tools, submit_tool_name):
                 })
 
             # Feed tool results back in and let the loop continue (ACT -> CONTINUE)
+            print("  [STOP_REASON CHECK] -> CONTINUE: tool result sent back, looping again")
             messages.append({"role": "user", "content": tool_results})
 
         elif response.stop_reason == "end_turn":
             # Model stopped talking without ever submitting an answer.
+            print("  [STOP_REASON CHECK] -> HALT: 'end_turn' with no submission (incomplete)")
             print("  (agent ended without submitting a result)")
             return None
 
         elif response.stop_reason == "max_tokens":
             # Got cut off mid-answer -- don't trust it, just halt.
+            print("  [STOP_REASON CHECK] -> HALT: 'max_tokens' (truncated, degraded halt)")
             print("  (agent got cut off / ran out of tokens)")
             return None
 
         else:
+            print(f"  [STOP_REASON CHECK] -> HALT: unrecognized stop_reason (defensive halt)")
             print(f"  (unexpected stop_reason: {response.stop_reason})")
             return None
 
@@ -186,7 +193,14 @@ def run_research_agent(topic, question):
     print(f"\n--- Researching topic: {topic} ---")
     system_prompt = (
         f"You are a research specialist focused only on the '{topic}' angle. "
-        "Use search_sources if helpful, then call submit_finding with your result."
+        "Use search_sources if helpful, then call submit_finding with your result.\n\n"
+        "IMPORTANT: search_sources is a STUB/placeholder tool for testing this "
+        "pipeline. It does NOT return real data -- it only returns dummy text "
+        "like 'Placeholder source about: <your query>'. Do NOT use your own "
+        "background knowledge to fill in real-sounding facts. Your summary and "
+        "key_points must honestly reflect that this is placeholder research, "
+        "e.g. 'Placeholder research for {topic}: no real data available, stub "
+        "search returned dummy results only.'"
     )
     result = run_agent(
         system_prompt=system_prompt,
@@ -216,9 +230,17 @@ def run_synthesizer_agent(question, findings):
             f"Key points: {', '.join(f['key_points'])}\n"
         )
 
+    print("  [EXPLICIT CONTEXT PASSED TO SYNTHESIZER] -----------------------")
+    print(context_text)
+    print("  --------------------------------------------------------------")
+
     system_prompt = (
         "You combine research findings from specialists into one final answer. "
-        "You do not research anything yourself. Call submit_synthesis when done."
+        "You do not research anything yourself. Call submit_synthesis when done.\n\n"
+        "IMPORTANT: the findings you receive are PLACEHOLDER/dummy data from a "
+        "test pipeline, not real research. Your final_answer must say plainly "
+        "that this is a placeholder/demo run with no real data, not a real "
+        "investment recommendation. Do not invent real-sounding analysis."
     )
     first_message = (
         f"Original question: {question}\n\n"
@@ -272,8 +294,10 @@ def run_coordinator_agent(question):
             tools=tools,
         )
         messages.append({"role": "assistant", "content": response.content})
+        print(f"  [STOP_REASON CHECK] (coordinator) iteration {iteration+1}: stop_reason='{response.stop_reason}'")
 
         if response.stop_reason == "tool_use":
+            print("  [STOP_REASON CHECK] (coordinator) -> ACT: tool requested, will execute and CONTINUE loop")
             tool_results = []
 
             for block in response.content:
@@ -282,6 +306,7 @@ def run_coordinator_agent(question):
 
                 if block.name == "dispatch_research_agent":
                     topic = block.input["topic"]
+                    print(f"  [COORDINATOR -> SUBAGENT] Hub delegating to RESEARCH specialist: '{topic}'")
                     finding = run_research_agent(topic, question)
                     if finding:
                         findings.append(finding)
@@ -292,11 +317,16 @@ def run_coordinator_agent(question):
                 elif block.name == "dispatch_synthesizer":
                     # --- HARD GATE (in code, not left to the LLM) ---
                     if len(findings) != len(TOPICS):
+                        print(f"  [HARD GATE CHECK] BLOCKED: {len(findings)}/{len(TOPICS)} "
+                              f"research topics done -- synthesizer will NOT run")
                         tool_result_text = (
                             f"Refused: only {len(findings)}/{len(TOPICS)} topics "
                             "researched so far. Dispatch the missing topics first."
                         )
                     else:
+                        print(f"  [HARD GATE CHECK] ALLOWED: {len(findings)}/{len(TOPICS)} "
+                              f"research topics done -- proceeding to synthesis")
+                        print("  [COORDINATOR -> SUBAGENT] Hub delegating to SYNTHESIS specialist")
                         synthesis = run_synthesizer_agent(question, findings)
                         if synthesis:
                             final_synthesis.update(synthesis)
@@ -317,19 +347,23 @@ def run_coordinator_agent(question):
 
                 # coordinator_done ends the whole coordinator loop
                 if block.name == "coordinator_done":
+                    print("  [STOP_REASON CHECK] (coordinator) -> HALT: 'coordinator_done' called, task truly done")
                     return final_synthesis
 
             messages.append({"role": "user", "content": tool_results})
 
         elif response.stop_reason == "end_turn":
+            print("  [STOP_REASON CHECK] (coordinator) -> HALT: 'end_turn' with no coordinator_done call")
             print("  (coordinator ended its turn without calling coordinator_done)")
             return final_synthesis
 
         elif response.stop_reason == "max_tokens":
+            print("  [STOP_REASON CHECK] (coordinator) -> HALT: 'max_tokens' (truncated, degraded halt)")
             print("  (coordinator got cut off / ran out of tokens)")
             return final_synthesis
 
         else:
+            print("  [STOP_REASON CHECK] (coordinator) -> HALT: unrecognized stop_reason (defensive halt)")
             print(f"  (unexpected stop_reason: {response.stop_reason})")
             return final_synthesis
 
